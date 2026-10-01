@@ -1,12 +1,13 @@
 # btrmaps
 
-btrmaps is a fast map of how space is used on a btrfs filesystem. You can pan and
-zoom from the whole disk down to single 4 KiB blocks while it scans. Drawing takes
-about 1 ms of CPU per frame, and the scan runs in a separate process at the lowest
-CPU and I/O priority, so neither the window nor the rest of the desktop slows down.
+btrmaps lays a btrfs filesystem out along a Hilbert curve and samples it live, one
+lookup per pixel on screen, so you can zoom from the whole disk down to single
+blocks while it fills in. Drawing takes about 1 ms of CPU per frame, and the scan
+runs in a separate process at the lowest CPU and I/O priority, so neither the
+window nor the rest of the desktop slows down.
 
-The filesystem's address space is laid out along a Hilbert curve, so each pixel
-is a range of the disk and neighbouring pixels are neighbouring bytes.
+On the curve, each pixel is a range of the disk and neighbouring pixels are
+neighbouring bytes.
 
 ![Zooming into a btrfs filesystem](docs/zoom.webp)
 
