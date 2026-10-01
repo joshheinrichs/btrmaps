@@ -1,11 +1,9 @@
 # btrmaps
 
-btrmaps lays a btrfs filesystem out along a Hilbert curve and samples it live, one
-lookup per pixel on screen, so you can zoom from the whole disk down to single
-blocks while it fills in.
-
-On the curve, each pixel is a range of the disk and neighbouring pixels are
-neighbouring bytes.
+btrmaps lays a btrfs filesystem out along a Hilbert curve, where neighbouring
+pixels are neighbouring bytes, and samples it live, one lookup per pixel on
+screen, so you can zoom from the whole disk down to single blocks while it fills
+in.
 
 ![Zooming into a btrfs filesystem](docs/zoom.webp)
 
