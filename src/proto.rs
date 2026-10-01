@@ -1,38 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-/// One JSON line of the stream `btrmaps scan` writes and `btrmaps view` reads.
-///
-/// A header comes first. A set is always sent before the first cell that uses it.
-/// Cells arrive coarse to fine: each level probes the whole curve at 4^level cells,
-/// so a viewer can draw every level as it lands and let finer ones overwrite it.
+/// One JSON line of what `btrmaps scan` writes: a header, then for each probe request
+/// any sets not seen before, followed by the request's runs.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Msg {
     Header(Header),
     Set(SetInfo),
-    Cells {
-        level: u32,
-        cells: Vec<Cell>,
-    },
-    /// Exact answers to probe requests: whole extents (or free stretches) around each
-    /// probed position, so one answer can fill many pixels.
+    /// The answer to one probe request: for each position, in order, everything known
+    /// to share it (the used part of its extent, a free stretch, a metadata chunk), so
+    /// one answer can fill many pixels.
     Runs {
         runs: Vec<Run>,
     },
-    Done,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Header {
     pub source: String,
-    /// The finest level; the curve is 2^order cells on a side.
-    pub order: u32,
-    /// Bytes of chunks laid end to end.
+    /// Bytes of chunks laid end to end: the length of the curve.
     pub total: u64,
-    /// Bytes per cell at the finest level. A level-k cell is `cell * 4^(order-k)`.
-    pub cell: u64,
     /// Known (generation, unix time) pairs, oldest first: subvolume creation and last
-    /// change, and the filesystem's generation at scan time. Lets a viewer put an
+    /// change, and the filesystem's generation now. Lets the window put an
     /// approximate date on the generation that wrote an extent.
     #[serde(default)]
     pub calibration: Vec<(u64, i64)>,
@@ -47,8 +36,6 @@ pub enum Kind {
     Free,
     Metadata,
     System,
-    /// Past the end of the filesystem; the grid has more cells than bytes.
-    Past,
     Error,
 }
 
@@ -74,17 +61,13 @@ pub struct SetInfo {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
-    /// The deepest directory holding every path, computed from all of them ("" = top level).
-    /// Deleting anything below it leaves these bytes in use.
-    #[serde(default)]
-    pub dominator: String,
 }
 
-/// Compression of the extent a cell sits in.
+/// Compression of the extent a position sits in.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Algo {
-    /// Not a data cell, or its extent item could not be found.
+    /// Not file data, or its extent item could not be found.
     #[default]
     Unknown,
     None,
@@ -94,13 +77,9 @@ pub enum Algo {
     Other,
 }
 
-/// `[curve index at its level, set id, algorithm, decompressed/on-disk ratio × 100,
-/// generation that wrote the extent (0 when unknown)]`.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-pub struct Cell(pub u32, pub u32, pub Algo, pub u32, pub u64);
-
 /// `[start, length, set id, algorithm, ratio × 100, generation]`, in bytes along the
-/// curve (chunks laid end to end, as `Header::total` counts them).
+/// curve (chunks laid end to end, as `Header::total` counts them). Generation 0 means
+/// unknown.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct Run(pub u64, pub u64, pub u32, pub Algo, pub u32, pub u64);
 

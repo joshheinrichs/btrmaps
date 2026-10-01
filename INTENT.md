@@ -14,22 +14,31 @@
   how compressed it is.
 - Compression comes from what btrfs already records per extent — never
   estimated by reading and compressing data.
-- A treemap view beside the curve, still built from the samples and fast. Shared
-  bytes sit at their dominator: the deepest directory holding every path.
 - An Age heatmap: when each extent was written.
 - Feels like a normal app: a top bar with btrmaps and a filesystem dropdown on the
-  left, view and mode in the middle, Refresh on the right.
+  left, modes in the middle, Refresh on the right.
 - Few knobs: no detail selector (the scan picks it from the window size), no
-  shading, full resolution always on. Folder frames are a treemap-only option.
+  shading, full resolution always on, no treemap.
 - The filesystem menu only selects; a big Scan button starts the scan. The only
   filesystem (or the one at /) is preselected.
 - Long paths are shortened in the middle ("…"), keeping the file name.
-- Clicking a tile goes straight to the deepest folder holding it and selects it.
-- Right-click menus on files and folders: copy path, show in folder, move to
+- Right-click menus on files: copy path, show in folder, move to
   Trash, delete (confirmed). Nix-managed paths are left to garbage collection.
 - The window stays responsive, even at the highest detail and mid-scan.
 - Full resolution: zooming past the scan's detail refines what is on screen down
   to single blocks, filling in coarse to fine like progressive ray tracing,
   without leftovers from coarser levels showing through.
+- Hovering the map never dims it, so panning and zooming stay readable. Click a
+  set to spotlight it, or hold Shift to peek at whatever is under the pointer.
+  Hovering a row in the list spotlights it too.
 - Hovering or selecting free space doesn't spotlight it; empty space isn't a focus.
 - Refresh re-runs the scan; the side pane is resizable.
+- Resizing the window shows more or less of the map at the same scale; it never
+  rescales it. Panning never rescans what was already looked at.
+- An extremely simple architecture: a few very good decisions that make the whole
+  thing efficient. Simple is fast.
+- Performance matters: use every core, and the GPU where it fits. CPU use in
+  proportion to what changed; nothing when idle.
+- Like a web map: progressive 2× resolutions with sensible caching. Detail resolves
+  continuously for what is visible; no separate scan or scan levels.
+- A generic tool, its own open-source repo (MIT or Apache-2.0).

@@ -60,46 +60,47 @@ pkgs.testers.runNixOSTest {
     machine.succeed("mount -o subvol=@ /dev/vdb /root-subvol")
     # Let the test user delete in @, for the delete-from-the-menu check below.
     machine.succeed("chmod 777 /root-subvol")
-    machine.succeed("btrmaps scan --order 7 -o /tmp/scan.jsonl /root-subvol")
+    # The helper answers probe requests on stdin; without any it sends its header and ends.
+    def scan(*requests):
+        lines = "\n".join(json.dumps({"t": "probe", "positions": p}) for p in requests)
+        machine.succeed(f"cat > /tmp/requests.jsonl << 'EOF'\n{lines}\nEOF")
+        out = machine.succeed("btrmaps scan /root-subvol < /tmp/requests.jsonl")
+        return [json.loads(l) for l in out.splitlines()]
+
+    header = scan()[0]
+    assert header["t"] == "header" and header["total"] > 0, header
     machine.succeed("test -z \"$(ls /tmp | grep btrmaps-)\"")
     machine.succeed("! grep -q /tmp/btrmaps- /proc/mounts")
-    machine.copy_from_machine("/tmp/scan.jsonl", "")
 
-    msgs = [json.loads(l) for l in machine.succeed("cat /tmp/scan.jsonl").splitlines()]
-    header = msgs[0]
-    assert header["t"] == "header" and header["order"] == 7, header
-    assert msgs[-1] == {"t": "done"}, msgs[-1]
+    # An even grid of positions, like the window's sweep, in two requests.
+    total, n = header["total"], 8192
+    grid = [i * total // n + total // (2 * n) for i in range(n)]
+    msgs = scan(grid[: n // 2], grid[n // 2 :])
     sets = [m for m in msgs if m["t"] == "set"]
     assert [s["id"] for s in sets] == list(range(len(sets))), "set ids not dense and ordered"
-    levels = [m["level"] for m in msgs if m["t"] == "cells"]
-    assert levels == sorted(levels) and levels[0] == 6 and levels[-1] == 7, levels
-
-    # Every set arrives before its first use.
     seen = set()
+    answers = []
     for m in msgs:
         if m["t"] == "set":
             seen.add(m["id"])
-        if m["t"] == "cells":
-            assert all(c[1] in seen for c in m["cells"]), "cell before its set"
+        if m["t"] == "runs":
+            assert all(r[2] in seen for r in m["runs"]), "run before its set"
+            answers += m["runs"]
+    assert len(answers) == n, f"one answer per position: {len(answers)}"
+    for pos, (start, length, *_) in zip(grid, answers):
+        assert start <= pos < start + length, f"run {start}+{length} misses {pos}"
 
-    # The finest level covers the whole curve exactly once.
-    final = {}
-    for m in msgs:
-        if m["t"] == "cells" and m["level"] == 7:
-            for d, s, algo, ratio, _ in m["cells"]:
-                assert d not in final, f"cell {d} twice"
-                final[d] = (sets[s], algo, ratio)
-    assert sorted(final) == list(range(4 ** 7))
-
+    # Each position's answer, then sizes by counting positions.
+    final = [(sets[r[2]], r[3], r[4], r[5]) for r in answers]
     by_key = {}
-    for s, _, _ in final.values():
+    for s, _, _, _ in final:
         key = (s["kind"], tuple(s.get("paths", [])))
-        by_key[key] = by_key.get(key, 0) + header["cell"]
+        by_key[key] = by_key.get(key, 0) + total / n
     for key, size in sorted(by_key.items(), key=lambda kv: -kv[1]):
-        print(f"{size >> 20:6} MiB  {key}")
+        print(f"{int(size) >> 20:6} MiB  {key}")
 
     def size(kind, *files):
-        return by_key.get((kind, tuple(sorted(files))), 0) >> 20
+        return int(by_key.get((kind, tuple(sorted(files))), 0)) >> 20
 
     def near(got, want, what):
         assert abs(got - want) <= want * 0.15 + 1, f"{what}: {got} MiB, expected ~{want}"
@@ -123,51 +124,32 @@ pkgs.testers.runNixOSTest {
     hard = the_set("@/hard1", "@/hard2")
     assert (hard["files"], hard["subvolumes"], hard["path_count"]) == (1, 1, 2), hard
 
-    # Shared bytes belong to the deepest directory holding every path.
-    assert snapped["dominator"] == "", snapped
-    assert the_set("@/big", "@/big-reflink")["dominator"] == "@", "reflink dominator"
-    assert hard["dominator"] == "@", hard
+    def answers_of(*files):
+        return [(a, r, g) for s, a, r, g in final if s.get("paths") == list(files) and s["kind"] == "data"]
 
-    def cells_of(*files):
-        return [(a, r) for s, a, r in final.values() if s.get("paths") == list(files) and s["kind"] == "data"]
-
-    text = cells_of("@/text")
-    assert text and all(a == "zstd" and r > 500 for a, r in text), text
-    plain = cells_of("@/unique")
-    assert plain and all(a == "none" and r == 100 for a, r in plain), plain
-    assert all(a == "unknown" for s, a, _ in final.values() if s["kind"] in ("free", "metadata", "system"))
+    text = answers_of("@/text")
+    assert text and all(a == "zstd" and r > 500 for a, r, _ in text), text
+    plain = answers_of("@/unique")
+    assert plain and all(a == "none" and r == 100 for a, r, _ in plain), plain
+    assert all(a == "unknown" for s, a, _, _ in final if s["kind"] in ("free", "metadata", "system"))
 
     # Ages: every extent's generation is known, later writes have later generations,
-    # and the calibration btrfs records is ordered and ends at the scan.
-    gens = {d: g for m in msgs if m["t"] == "cells" and m["level"] == 7 for d, _, _, _, g in m["cells"]}
-    def gen_of(*files):
-        return {gens[d] for d, (s, _, _) in final.items() if s.get("paths") == list(files) and s["kind"] == "data"}
-    assert min(gen_of("@/text")) > max(gen_of("@/unique")) > max(gen_of("@/snapped", "@snap/snapped")) > 0
+    # and the calibration btrfs records is ordered and ends now.
+    def generations(*files):
+        return {g for _, _, g in answers_of(*files)}
+    assert min(generations("@/text")) > max(generations("@/unique")) > max(generations("@/snapped", "@snap/snapped")) > 0
     cal = header["calibration"]
     assert len(cal) >= 2 and cal == sorted(cal), cal
     assert all(t1 >= t0 for (_, t0), (_, t1) in zip(cal, cal[1:])), cal
 
-    # Full resolution: probes sent on stdin come back as whole runs (extents, free
-    # stretches) in bytes along the curve, owned by exactly the files there.
-    cell = header["cell"]
-    def middle_of(kind, *files):
-        ds = sorted(d for d, (s, _, _) in final.items() if s["kind"] == kind and s.get("paths", []) == list(files))
-        return ds[len(ds) // 2] * cell + cell // 2
-    unique_at, free_at = middle_of("data", "@/unique"), middle_of("free")
-    request = json.dumps({"t": "probe", "positions": [unique_at, free_at]})
-    machine.succeed(f"echo '{request}' | btrmaps scan --order 7 /root-subvol > /tmp/probe.jsonl")
-    answers = [json.loads(l) for l in machine.succeed("cat /tmp/probe.jsonl").splitlines()]
-    probe_sets = {m["id"]: m for m in answers if m["t"] == "set"}
-    runs = [r for m in answers if m["t"] == "runs" for r in m["runs"]]
-    def run_over(pos):
-        return next(r for r in runs if r[0] <= pos < r[0] + r[1])
-    start, length, sid, _, _, _ = run_over(unique_at)
-    assert probe_sets[sid].get("paths") == ["@/unique"], probe_sets[sid]
-    assert length >= 1 << 20, f"a data answer covers its whole extent, got {length} bytes"
-    start, length, sid, _, _, _ = run_over(free_at)
-    assert probe_sets[sid]["kind"] == "free" and length > 4096, (probe_sets[sid], length)
+    # Runs cover whatever is known to share the position: a data answer its extent's
+    # used part, a free answer the stretch up to the next extent.
+    def run_of(kind, *files):
+        return next(r for r, (s, _, _, _) in zip(answers, final) if s["kind"] == kind and s.get("paths", []) == list(files))
+    assert run_of("data", "@/unique")[1] >= 1 << 20, "a data answer covers its extent"
+    assert run_of("free")[1] > 4096, "a free answer covers its stretch"
 
-    # The app: launch it, pick the filesystem, let polkit run the scan.
+    # The app: launch it, scan the preselected filesystem through sudo.
     machine.wait_for_file("/tmp/sway-ipc.sock")
     alice = "su - alice -c "
     window = alice + "'swaymsg -t get_tree' | grep -q '\"app_id\": \"btrmaps\"'"
@@ -187,11 +169,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed(ydotool + "click 0xC0")
         machine.sleep(2)
 
-    machine.succeed(alice + "'swaymsg exec btrmaps'")
+    machine.succeed(alice + "'swaymsg exec \"env BTRMAPS_FRAMES=1 btrmaps 2>/tmp/frames.log\"'")
     machine.wait_until_succeeds(window, timeout=60)
     machine.sleep(3)
     shot("start")
-    # A narrow window: the bar's less important controls move into its "…" menu.
+    # A narrow window: the mode buttons become a menu.
     machine.succeed(alice + "'swaymsg [app_id=btrmaps] floating enable, resize set 800 600, move position 0 30'")
     machine.sleep(2)
     shot("narrow")
@@ -201,6 +183,11 @@ pkgs.testers.runNixOSTest {
     click(640, 420)  # Scan
     machine.sleep(2)
     shot("password")
+    # A wrong password is turned down at once and asked for again, not left hanging.
+    machine.succeed(ydotool + "type wrong")
+    machine.succeed(ydotool + "key 28:1 28:0")  # Enter
+    machine.sleep(6)
+    shot("wrong-password")
     machine.succeed(ydotool + "type hunter2")
     machine.succeed(ydotool + "key 28:1 28:0")  # Enter
     # sudo accepted the typed password and ran the scan as root.
@@ -209,6 +196,24 @@ pkgs.testers.runNixOSTest {
     machine.succeed(window)
     point(640, 790)
     shot("curve")
+    # Drag the map around for a few seconds, timing frames.
+    point(450, 430)
+    machine.succeed(ydotool + "click 0x40")
+    for i in range(40):
+        machine.succeed(ydotool + f"mousemove -x {8 if i < 20 else -8} -y {5 if i % 10 < 5 else -5}")
+    machine.succeed(ydotool + "click 0x80")
+    machine.sleep(3)
+    # Resizing shows more or less of the map at the same scale; it doesn't rescale it.
+    machine.succeed(alice + "'swaymsg [app_id=btrmaps] floating enable, resize set 900 600, move position 0 30'")
+    machine.sleep(3)
+    shot("resized")
+    machine.succeed(alice + "'swaymsg [app_id=btrmaps] floating disable'")
+    machine.sleep(3)
+    # Zoomed in a little, the map hangs off every edge and must stay undistorted.
+    for _ in range(3):
+        machine.succeed(ydotool + "key 13:1 13:0")  # =, zoom in
+    machine.sleep(3)
+    shot("zoomed")
     # Zoom far past the scan's detail: the view refines itself from exact probes.
     for _ in range(8):
         machine.succeed(ydotool + "key 13:1 13:0")  # =, zoom in
@@ -216,22 +221,30 @@ pkgs.testers.runNixOSTest {
     shot("deep")
     for _ in range(8):
         machine.succeed(ydotool + "key 12:1 12:0")  # -, zoom back out
-    machine.sleep(1)
-    click(523, 67)  # Treemap
-    point(620, 250)  # a file inside a folder: highlights its folders, fills the status bar
-    shot("treemap-hover")
-    point(200, 400)  # free space: described in the side pane, but nothing dims
+    machine.sleep(2)
+    point(600, 500)  # free space: described in the side pane, but nothing dims
     shot("free-hover")
-    point(815, 210)  # the unique file
+    point(250, 330)  # the unique file: described, but hovering alone dims nothing
+    shot("hover")
+    machine.succeed(ydotool + "key 42:1")  # hold Shift: everything else dims
+    machine.sleep(1)
+    shot("peek")
+    machine.succeed(ydotool + "key 42:0")
     machine.succeed(ydotool + "click 0xC1")  # right button
     machine.sleep(2)
     shot("menu")
-    click(860, 316)  # Delete file…
+    click(295, 436)  # Delete file…
     shot("confirm")
     click(453, 453)  # Delete
     # The file the menu was opened on is gone; its neighbours are not.
     machine.wait_until_fails("test -e /top/@/unique", timeout=10)
     machine.succeed("test -e /top/@/big && test -e /top/@/snapped")
     shot("deleted")
+    # Modes recolor through the GPU's tables, without touching tiles.
+    click(684, 68)  # Compression
+    shot("compression")
+    click(755, 68)  # Age
+    shot("age")
+    print(machine.succeed("cat /tmp/frames.log"))
   '';
 }

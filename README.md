@@ -1,25 +1,36 @@
 # btrmaps
 
-A map of where the space on a btrfs filesystem goes, drawn along a Hilbert curve
-in disk order.
+btrmaps is a fast map of how space is used on a btrfs filesystem. You can pan and
+zoom from the whole disk down to single 4 KiB blocks while it scans. Drawing takes
+about 1 ms of CPU per frame, and the scan runs in a separate process at the lowest
+CPU and I/O priority, so neither the window nor the rest of the desktop slows down.
 
-Every color is one exact set of files owning those bytes, so snapshots, reflinks
-and hardlinks show up as shared regions instead of being counted twice. Other
-modes color the same map by how widely each region is shared, how well it
-compresses (from what btrfs already records per extent), and how old it is.
+The filesystem's address space is laid out along a Hilbert curve, so each pixel
+is a range of the disk and neighbouring pixels are neighbouring bytes.
 
-Zooming refines what is on screen down to single blocks, filling in coarse to
-fine.
+![Zooming into a btrfs filesystem](docs/zoom.webp)
+
+Each color is a set of files that own those bytes. Data shared through snapshots,
+reflinks or hardlinks gets its own color instead of being counted once per file.
+
+There are four modes:
+
+- Owners: the set of files that own each region.
+- Sharing: how many files share each region.
+- Compression: the compression ratio btrfs records for each extent.
+- Age: when each extent was written.
 
 ## Install
 
-Linux only (btrfs), on Wayland or X11, with `sudo`.
+Requires Linux, btrfs, Wayland or X11, and `sudo`.
 
-- **Release binaries** for x86_64 and aarch64 are on the releases page; they need
+- Release binaries for x86_64 and aarch64 are on the
+  [releases page](https://github.com/joshheinrichs/btrmaps/releases). They need
   glibc 2.35 or newer.
-- **Nix:** `nix-build` builds `result/bin/btrmaps`. The expression takes
-  `pkgs` if you want to build against your own nixpkgs.
-- **Cargo:** `cargo install --path .`
+- Nix: `nix run github:joshheinrichs/btrmaps`, or `nix-build`, which builds
+  `result/bin/btrmaps`. `default.nix` takes a `pkgs` argument if you want to use
+  your own nixpkgs.
+- Cargo: `cargo install --git https://github.com/joshheinrichs/btrmaps`
 
 ## Usage
 
@@ -27,42 +38,72 @@ Linux only (btrfs), on Wayland or X11, with `sudo`.
 btrmaps
 ```
 
-Pick a filesystem, press Scan and enter your password. The window never runs as
-root: it starts `btrmaps scan` through `sudo` to read the filesystem's trees and
-streams the results back.
+Pick a filesystem, press Scan and enter your password. Scroll to zoom and drag to
+pan. Hovering shows the files under the pointer. Click a set to highlight it, or
+hold Shift to highlight whatever is under the pointer. Right-click to copy a path,
+open its folder, or move it to the trash.
 
-## How it works
+The window doesn't run as root. It starts a helper, `btrmaps scan`, through
+`sudo`; the helper reads the filesystem's trees and answers which files own a
+given position on disk.
 
-The scan samples the filesystem at evenly spaced points along the curve and asks
-btrfs which files own the bytes at each point. Detail grows coarse to fine, so a
-rough picture appears at once and sharpens as the scan runs. Past the scan's
-detail, the window asks the root helper about exactly what is on screen and draws
-the answers in place.
+## Background
+
+The layout comes from Farid Zakaria's
+[Visualizing Nix closures](https://fzakaria.com/2026/09/15/visualizing-nix-closures),
+which puts the bytes of Nix store paths on a Hilbert curve. The way bytes are
+attributed to files comes from [btdu](https://github.com/CyberShadow/btdu): look
+up what is at a disk position with `LOGICAL_INO` and attribute shared extents to
+every file that references them.
+
+<details>
+<summary>How it works</summary>
+
+The map is split into 256×256 tiles at several zoom levels, each twice the
+resolution of the one above, down to one pixel per 4 KiB. On a Hilbert
+curve an aligned square is a contiguous range of bytes, so a tile only needs
+redrawing when new information arrives for its range.
+
+The window sends the helper the positions of on-screen pixels that don't have an
+answer yet, coarser levels first. The helper answers each position with the whole
+extent, free range or metadata chunk containing it, which usually covers many
+pixels. A pixel without its own answer shows its parent's.
+
+A quarter of the requests, and all of them once the visible area is done, go to
+an evenly spaced grid over the whole disk. The sizes in the side pane are
+estimated from that grid. Unlike btdu, which samples at random, the grid is fixed,
+so the same disk gives the same picture.
+
+Tiles store set ids and compression and age codes rather than colors. The GPU
+turns them into colors with a lookup table, so changing modes doesn't redraw any
+tiles.
+
+</details>
 
 ## Credits
 
-- **[btdu](https://github.com/CyberShadow/btdu)** by Vladimir Panteleev, the
-  sampling disk usage profiler for btrfs. btrmaps borrows its core idea: pick a
-  point on the disk, ask btrfs what is there (`LOGICAL_INO`), and attribute
-  shared extents to every file that owns them, including unreachable and
-  compressed space. btdu samples at random; btrmaps samples a fixed grid along
-  the curve so the picture is deterministic and spatial.
-- **[Visualizing Nix closures](https://fzakaria.com/2026/09/15/visualizing-nix-closures)**
-  by Farid Zakaria ([seenix](https://github.com/fzakaria/seenix)), which lays the
-  bytes of Nix closures out on a Hilbert curve. That post is where the idea of
-  mapping btrfs space the same way came from.
-- **[Visualising binaries](https://corte.si/posts/visualisation/binvis/)** by
-  Aldo Cortesi ([binvis.io](https://binvis.io)), the earlier work behind using
-  Hilbert curves to keep neighbouring bytes neighbours on screen, which the seenix
-  post credits in turn.
+- [btdu](https://github.com/CyberShadow/btdu) by Vladimir Panteleev, a sampling
+  disk usage profiler for btrfs. btrmaps uses the same method to find which files
+  own a disk position, including shared, unreachable and compressed extents.
+- [Visualizing Nix closures](https://fzakaria.com/2026/09/15/visualizing-nix-closures)
+  by Farid Zakaria ([seenix](https://github.com/fzakaria/seenix)), the Hilbert
+  curve layout btrmaps is based on.
+- [Visualising binaries](https://corte.si/posts/visualisation/binvis/) by Aldo
+  Cortesi ([binvis.io](https://binvis.io)), earlier work on Hilbert curves for
+  binary data, which seenix credits.
 
 ## Development
 
-`cargo test` runs the unit tests. `nix-build -A tests.e2e` runs the end-to-end
-test: a NixOS VM with a real btrfs disk (snapshots, reflinks, hardlinks,
-compression) that checks the scan's output and then drives the app under sway,
-leaving screenshots in `result`. CI runs both; pushing a `v*` tag matching
-`Cargo.toml`'s version builds release binaries.
+`nix-shell` (or `nix develop`) provides the pinned toolchain and the libraries
+`cargo run` needs to open a window. `cargo test` runs the unit tests.
+
+`nix-build -A tests.e2e` (or `nix flake check`) runs the end-to-end test in a
+NixOS VM with a btrfs disk containing snapshots, reflinks, hardlinks and
+compressed files. It checks the helper's answers, then runs the app under sway and
+saves screenshots to `result`.
+
+CI runs both. Pushing a `v*` tag that matches the version in `Cargo.toml` builds
+release binaries.
 
 ## License
 

@@ -1,45 +1,29 @@
+mod atlas;
 mod btrfs;
+mod elevate;
+mod gpu;
+mod hilbert;
+mod mounts;
+mod palette;
 mod proto;
 mod scan;
-mod treemap;
-mod view;
+mod stats;
+mod tiles;
+mod ui;
+mod worker;
 
-use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
+use anyhow::{Result, bail};
 
 /// `btrmaps` opens the app. `btrmaps scan` is the root helper the app runs through sudo.
 const USAGE: &str = "\
 usage: btrmaps
-       btrmaps scan [--order N] [-o SCAN.jsonl] PATH   (root; what the app runs via sudo)";
-
-fn parse_scan(argv: &[String]) -> Result<scan::Args> {
-    let (mut path, mut out, mut order) = (None, None, 10);
-    let mut it = argv.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-o" | "--output" => out = Some(PathBuf::from(it.next().context("-o needs a file")?)),
-            "--order" => {
-                order = it.next().context("--order needs a number")?.parse()?;
-                if !(1..=12).contains(&order) {
-                    bail!("--order must be between 1 and 12");
-                }
-            }
-            _ if path.is_none() => path = Some(PathBuf::from(arg)),
-            _ => bail!("unexpected argument {arg:?}\n\n{USAGE}"),
-        }
-    }
-    Ok(scan::Args {
-        path: path.context(USAGE)?,
-        out,
-        order,
-    })
-}
+       btrmaps scan PATH   (root; answers probe requests on stdin, what the app runs via sudo)";
 
 fn main() -> Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    match argv.split_first() {
-        None => view::run(),
-        Some((cmd, rest)) if cmd == "scan" => match scan::run(parse_scan(rest)?) {
+    match argv.as_slice() {
+        [] => ui::run(),
+        [cmd, path] if cmd == "scan" => match scan::run(scan::Args { path: path.into() }) {
             // The app went away or moved on; that is how a scan gets stopped.
             Err(e)
                 if e.downcast_ref::<std::io::Error>()
@@ -49,6 +33,6 @@ fn main() -> Result<()> {
             }
             r => r,
         },
-        Some(_) => bail!(USAGE),
+        _ => bail!(USAGE),
     }
 }
